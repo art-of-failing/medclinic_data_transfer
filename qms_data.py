@@ -25,7 +25,9 @@ class File_Reader():
             logger.log(50,f'Ошибка получения данных из файла. Текст ошибки: {e}')
         else:
             logger.log(20,f'Данные из файла {self.file_list[0]} получены!')
-            os.remove(self.file_list[0])
+            
+            new_path = os.path.join(r'/home/contractor/qms_files/archive/', os.path.basename(self.file_list[0]))
+            os.rename(self.file_list[0],new_path)
 
     def __format_phone_number(self,phone):
         if pd.isna(phone) or not str(phone).strip():
@@ -46,7 +48,7 @@ class File_Reader():
     def to_db(self,data):
         count = 0
         for i,row in data.iterrows():
-            query =  """INSERT  INTO qms_data VALUES (DEFAULT,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"""
+            query =  """INSERT  INTO qms_data VALUES (DEFAULT,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"""
             try:
                 db.post(query=query,vars=(row['Дата начала звонка'],
                                                 row['Тип'],
@@ -57,8 +59,7 @@ class File_Reader():
                                                 row['Врач'],
                                                 row['Источник сведений'],
                                                 row['Результат звонка'],
-                                                row['ФИО оператора'],
-                                                row['Дата конца звонка']
+                                                row['ФИО оператора']
                                                 ))
             except:
                 ...
@@ -67,6 +68,7 @@ class File_Reader():
         logger.log(20,f'В БД qms_data записано {count} из {len(data)} строк!')
 
 
-file = File_Reader(os.getcwd()+r'/home/contractor/qms_files/')
+file = File_Reader(r'/home/contractor/qms_files/')
 file.to_db(file.df)
+
 
