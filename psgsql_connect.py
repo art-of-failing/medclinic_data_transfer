@@ -20,7 +20,7 @@ class Database:
 
       self.connection = psycopg2.connect(
           host="localhost",
-          database="pirogova_analytics",
+          database="analytics",
           user=user,
           password=password,
           port="5432",
