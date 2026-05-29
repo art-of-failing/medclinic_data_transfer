@@ -130,7 +130,7 @@ class Bitrix():
     def to_db(self,data,db):
         count = 0
         for i,row in data.iterrows():
-            query =  """INSERT  INTO bitix_data VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            query =  """INSERT  INTO bitrix_data VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                         ON CONFLICT (id)
                         DO UPDATE SET
                             id = EXCLUDED.id,

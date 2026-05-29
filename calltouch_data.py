@@ -84,21 +84,19 @@ class Calltouch():
     def to_db(self,df,db):
         count = 0
         for i,row in df.iterrows():
-            query =  """INSERT  INTO calltouch_data VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            query =  """INSERT  INTO calltouch_data VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
                         ON CONFLICT (siteName, callId)
                         DO UPDATE SET
                             date = EXCLUDED.date,
-                            end_date = EXCLUDED.end_date,
-                            callerNumber = EXCLUDED.callerNumber,
-                            utmSource = EXCLUDED.utmSource,
-                            utmMedium = EXCLUDED.utmMedium,
-                            utmCampaign = EXCLUDED.utmCampaign,
-                            utmContent = EXCLUDED.utmContent,
-                            utmTerm = EXCLUDED.utmTerm;"""
+                            callernumber = EXCLUDED.callerNumber,
+                            utmsource = EXCLUDED.utmSource,
+                            utmmedium = EXCLUDED.utmMedium,
+                            utmcampaign = EXCLUDED.utmCampaign,
+                            utmcontent = EXCLUDED.utmContent,
+                            utmterm = EXCLUDED.utmTerm;"""
             try:
                 db.post(query=query,vars=(row['callId'],
                                                 row['date'],
-                                                row['duration'],
                                                 row['callerNumber'],
                                                 row['utmSource'],
                                                 row['utmMedium'],
@@ -113,7 +111,7 @@ class Calltouch():
         logger.log(20,f'В БД calltouch_data записано {count} из {len(df)} строк!')
 
 ct_pirogova = Calltouch(site_id=ct_site_id,token=ct_api_token)
-#ct_pirogova.get_yesterday_data()
-ct_pirogova.get_custom_date_data('20/04/2026','25/05/2026')
+ct_pirogova.get_yesterday_data()
+#ct_pirogova.get_custom_date_data('20/04/2026','25/05/2026')
 
 

@@ -50,5 +50,4 @@ class Logger:
       self.logger.critical(text)
       sys.exit('Критическая ошибка')
 
-
-logger = Logger(r'C:\Users\HR\Documents\Python\Pirogova\venv\log')
+logger = Logger(r'/home/contractor/scripts/log')
