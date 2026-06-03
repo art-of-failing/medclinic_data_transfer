@@ -12,22 +12,32 @@ class File_Reader():
     def __init__(self,folder_path):
         self.folder_path = folder_path
         self.file_list = glob.glob(os.path.join(folder_path, 'call*.xls'))
-        try:
-            df_list = pd.read_html(self.file_list[0],skiprows=3,header=0)
-            df = pd.concat(df_list)
-            df['Дата начала звонка'] = pd.to_datetime(df['Дата звонка'] + ' ' + df['Время начала'],format='%d.%m.%Y %H:%M:%S')
-            df['Дата конца звонка'] = pd.to_datetime(df['Дата звонка'] + ' ' + df['Время окончания'],format='%d.%m.%Y %H:%M:%S')
-            df = df[pd.to_numeric(df['№'],errors='coerce').notna()]
-            df = df[['Дата начала звонка','Дата конца звонка', 'Тип', 'Телефон', 'Рег №', 'Тема звонка', 'Отделение', 'Врач', 'Источник сведений', 'Результат звонка', 'ФИО оператора']]
-            df['Телефон'] = df['Телефон'].apply(self.__format_phone_number)
-            self.df = df
-        except Exception as e:
-            logger.log(50,f'Ошибка получения данных из файла. Текст ошибки: {e}')
-        else:
-            logger.log(20,f'Данные из файла {self.file_list[0]} получены!')
+
+        with open(r'/home/contractor/qms_files/processed_files.txt','r') as f:
+            processed_files_list = f.read().split('\n')
+
+        for file in self.file_list:
+
+            if file in processed_files_list:
+                continue
+
+            try:
+                df_list = pd.read_html(self.file_list[0],skiprows=3,header=0)
+                df = pd.concat(df_list)
+                df['Дата начала звонка'] = pd.to_datetime(df['Дата звонка'] + ' ' + df['Время начала'],format='%d.%m.%Y %H:%M:%S')
+                df['Дата конца звонка'] = pd.to_datetime(df['Дата звонка'] + ' ' + df['Время окончания'],format='%d.%m.%Y %H:%M:%S')
+                df = df[pd.to_numeric(df['№'],errors='coerce').notna()]
+                df = df[['Дата начала звонка','Дата конца звонка', 'Тип', 'Телефон', 'Рег №', 'Тема звонка', 'Отделение', 'Врач', 'Источник сведений', 'Результат звонка', 'ФИО оператора']]
+                df['Телефон'] = df['Телефон'].apply(self.__format_phone_number)
+                self.df = df
+            except Exception as e:
+                logger.log(50,f'Ошибка получения данных из файла. Текст ошибки: {e}')
+            else:
+                logger.log(20,f'Данные из файла {self.file_list[0]} получены!')
+                
+                with open(r'/home/contractor/qms_files/processed_files.txt','a') as f:
+                    f.write(file + '\n')
             
-            new_path = os.path.join(r'/home/contractor/qms_files/archive/', os.path.basename(self.file_list[0]))
-            os.rename(self.file_list[0],new_path)
 
     def __format_phone_number(self,phone):
         if pd.isna(phone) or not str(phone).strip():
