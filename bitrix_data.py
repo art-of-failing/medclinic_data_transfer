@@ -1,185 +1,122 @@
-from datetime import datetime, timedelta
+import argparse
+from datetime import timedelta
 import os
-import requests
+import sys
 
 from dotenv import load_dotenv
 import pandas as pd
-import re
 
-from logger import logger
-from psgsql_connect import db
+from logger import get_logger
+from psgsql_connect import bulk_insert, connect
+from utils import TIMEOUT, check_response, format_phone, http_session, parse_period, to_rows
 
 load_dotenv()
-bitrix_host = os.getenv('bitrix_host')
-bitrix_token = os.getenv('bitrix_token')
-bitrix_user = os.getenv('bitrix_user')
+
+SOURCE_FIELD = 'UF_CRM_1760353216'
+
+COLUMNS = ['id', 'createdTime', 'stageId', 'phone', 'utmSource', 'utmMedium', 'utmCampaign', 'utmContent',
+           'utmTerm', 'SOURCE', 'SOURCE_DESCRIPTION']
+
+UPSERT = """INSERT INTO bitrix_data
+                (id, createdTime, stageId, phone, utmSource, utmMedium, utmCampaign, utmContent, utmTerm,
+                 source, sourceDescription)
+            VALUES %s
+            ON CONFLICT (id)
+            DO UPDATE SET
+                createdTime = EXCLUDED.createdTime,
+                stageId = EXCLUDED.stageId,
+                phone = EXCLUDED.phone,
+                utmSource = EXCLUDED.utmSource,
+                utmMedium = EXCLUDED.utmMedium,
+                utmCampaign = EXCLUDED.utmCampaign,
+                utmContent = EXCLUDED.utmContent,
+                utmTerm = EXCLUDED.utmTerm,
+                source = EXCLUDED.source,
+                sourceDescription = EXCLUDED.sourceDescription"""
+
+logger = get_logger('bitrix')
 
 
-class Bitrix():
-    def __init__(self,host,token,user):
-        self.host = host
-        self.__token = token
-        self.user = user
+class Bitrix:
+    def __init__(self, host, token, user):
+        self.base_url = f'https://{host}.bitrix24.ru/rest/{user}/{token}'
+        self.session = http_session()
 
-        try:
+        sources = self._call('crm.status.entity.items', {'entityId': 'SOURCE'}, 'справочник источников')
+        self.source_df = (pd.DataFrame(sources['result'])[['STATUS_ID', 'NAME']]
+                          .rename(columns={'NAME': 'SOURCE'}))
 
-            url = f'https://{self.host}.bitrix24.ru/rest/{self.user}/{self.__token}/crm.status.entity.items'
-            data = {
-                'entityId': 'SOURCE'
-            }
+        fields = self._call('crm.item.fields', {'entityTypeId': 1, 'useOriginalUfNames': 'Y'},
+                            'пользовательское поле')
+        df = pd.DataFrame(fields['result']['fields'][SOURCE_FIELD]['items'])
+        df.columns = ['ID', 'SOURCE_DESCRIPTION']
+        df['ID'] = df['ID'].astype('int64')
+        self.source_detail_df = df
 
-            response = requests.post(url=url,json=data)
-        except Exception as e:
-            logger.log(50,f'Ошибка получения данных справочника. Текст ошибки: {e}')
-        else:
-            if response.status_code != 200:
-                logger.log(50,f'Ошибка получения данных справочника. Код ответа: {response.status_code}. Тело ответа: {response.json()}')
-            else:
-                self.source_df = pd.DataFrame(response.json()['result'])[['STATUS_ID','NAME']]
-                self.source_df.columns = ['STATUS_ID','SOURCE']
-        
-        try:
-            url = f'https://{self.host}.bitrix24.ru/rest/{self.user}/{self.__token}/crm.item.fields'
-            data = {
-                'entityTypeId': 1,
-                'useOriginalUfNames' : 'Y'
-            }
+    def _call(self, method, data, what):
+        response = self.session.post(f'{self.base_url}/{method}', json=data, timeout=TIMEOUT)
+        return check_response(response, f'Bitrix ({what})')
 
-            response = requests.post(url=url,json=data)
-        except Exception as e:
-            logger.log(50,f'Ошибка получения данных пользовательского поля. Текст ошибки: {e}')
-        else:
-            if response.status_code != 200:
-                logger.log(50,f'Ошибка получения данных пользовательского поля. Код ответа: {response.status_code}. Тело ответа: {response.json()}')
-            else:
-                df = pd.DataFrame(response.json()['result']['fields']['UF_CRM_1760353216']['items'])
-                df['ID'] = df['ID'].astype('int64')
-                df.columns = ['ID','SOURCE_DESCRIPTION']
-                self.source_detail_df = df
-                
-            
-
-    def get_data(self,date1,date2,start=0):
-        url = f'https://{self.host}.bitrix24.ru/rest/{self.user}/{self.__token}/crm.item.list'
+    def get_data(self, date_from, date_to):
+        """Лиды, созданные с date_from 00:00 по date_to 23:59:59, со всех страниц."""
         data = {
             'entityTypeId': 1,
-            'select': [
-                'id',
-                'createdTime',
-                'stageId',
-                'phone',
-                'utmSource',
-                'utmMedium',
-                'utmCampaign',
-                'utmContent',
-                'utmTerm',
-                'sourceId',
-                'ufCrm_1760353216'
-            ],
+            'select': ['id', 'createdTime', 'stageId', 'phone', 'utmSource', 'utmMedium', 'utmCampaign',
+                       'utmContent', 'utmTerm', 'sourceId', 'ufCrm_1760353216'],
             'useOriginalUfNames': 'N',
             'filter': {
-                '>=createdTime': date1,
-                '<createdTime': date2,
+                '>=createdTime': date_from.strftime('%Y-%m-%dT00:00:00+03:00'),
+                '<createdTime': (date_to + timedelta(days=1)).strftime('%Y-%m-%dT00:00:00+03:00'),
             },
-            'order': {
-                'createdTime': 'DESC'
-            },
-            'start':start
+            'order': {'createdTime': 'DESC'},
+            'start': 0,
         }
+        items = []
+        while True:
+            result = self._call('crm.item.list', data, 'лиды')
+            items.extend(result['result']['items'])
+            if 'next' not in result:
+                break
+            data['start'] = result['next']
+        logger.info(f'Данные Bitrix за {date_from} — {date_to} получены: {len(items)} лидов')
+        return items
 
-        try:
-            response = requests.post(url=url,json=data)
-        except Exception as e:
-            logger.log(50,f'Ошибка выгрузки данных Bitrix. Текст ошибки: {e}')
-        else:
-            if response.status_code != 200:
-                logger.log(50,f'Ошибка запроса Bitrix {response.status_code}. Ответ: {response.json()}')
-            else:
-                logger.log(20,f'Данные Bitrix получены!')
-
-                df = self.to_df(response.json()['result']['items'])
-                self.to_db(db=db,data=df)
-
-                if 'next' in response.json():
-                    self.get_data(date1,date2,start=response.json()['next'])
-
-    
-    def to_df(self,data):
-        colums = [
-                'id',
-                'createdTime',
-                'stageId',
-                'phone',
-                'utmSource',
-                'utmMedium',
-                'utmCampaign',
-                'utmContent',
-                'utmTerm',
-                'SOURCE',
-                'SOURCE_DESCRIPTION'
-            ]
-        df = pd.DataFrame(data)
-        df['createdTime'] = pd.to_datetime(df['createdTime'],format='%Y-%m-%dT%H:%M:%S+03:00')
-        df['phone'] = df['phone'].apply(self.__format_phone_number)
-
+    def to_df(self, items):
+        df = pd.DataFrame(items)
+        df['createdTime'] = pd.to_datetime(df['createdTime'], format='%Y-%m-%dT%H:%M:%S+03:00')
+        df['phone'] = format_phone(df['phone'])
         df = (df
-              .merge(self.source_df,how='left',left_on='sourceId',right_on='STATUS_ID')
-              .merge(self.source_detail_df,how='left',left_on='ufCrm_1760353216',right_on='ID'))
-        return df[colums]
-    
-    def to_db(self,data,db):
-        count = 0
-        for i,row in data.iterrows():
-            query =  """INSERT  INTO bitrix_data VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                        ON CONFLICT (id)
-                        DO UPDATE SET
-                            id = EXCLUDED.id,
-                            createdTime = EXCLUDED.createdTime,
-                            stageId = EXCLUDED.stageId,
-                            phone = EXCLUDED.phone,
-                            utmSource = EXCLUDED.utmSource,
-                            utmMedium = EXCLUDED.utmMedium,
-                            utmCampaign = EXCLUDED.utmCampaign,
-                            utmContent = EXCLUDED.utmContent,
-                            utmTerm = EXCLUDED.utmTerm,
-                            source = EXCLUDED.source,
-                            sourceDescription = EXCLUDED.sourceDescription;"""
-            try:
-                db.post(query=query,vars=(row['id'],
-                                                row['createdTime'],
-                                                row['stageId'],
-                                                row['phone'],
-                                                row['utmSource'],
-                                                row['utmMedium'],
-                                                row['utmCampaign'],
-                                                row['utmContent'],
-                                                row['utmTerm'],
-                                                row['SOURCE'],
-                                                row['SOURCE_DESCRIPTION']))
-            except:
-                ...
-            else:
-                count += 1
-        logger.log(20,f'В БД bitix_data записано {count} из {len(data)} строк!')
-    
-    def __format_phone_number(self,phone):
-        if pd.isna(phone) or not str(phone).strip():
-            return pd.NA
-        
-        digits = re.sub(r'\D', '', str(phone))
+              .merge(self.source_df, how='left', left_on='sourceId', right_on='STATUS_ID')
+              .merge(self.source_detail_df, how='left', left_on='ufCrm_1760353216', right_on='ID'))
+        return df[COLUMNS].drop_duplicates('id', keep='last')
 
-        if len(digits) < 10:
-            return pd.NA
-        
-        if (digits.startswith('7') or digits.startswith('8')) and len(digits) == 11:
-            digits = digits[1:]
-        elif len(digits) > 11:
-            return digits
-        
-        return '7' + digits
+    @staticmethod
+    def to_db(df):
+        conn = connect()
+        try:
+            with conn, conn.cursor() as cur:
+                bulk_insert(cur, UPSERT, to_rows(df))
+        finally:
+            conn.close()
+        logger.info(f'В БД bitrix_data записано {len(df)} строк')
 
-today = datetime.today().strftime('%Y-%m-%dT00:00:00+03:00')
-yesterday = (datetime.today() - timedelta(days=1)).strftime('%Y-%m-%dT00:00:00+03:00')
 
-bitix = Bitrix(bitrix_host,bitrix_token,bitrix_user)
-bitix.get_data(yesterday,today)
+def main():
+    parser = argparse.ArgumentParser(description='Выгрузка лидов Bitrix24 в БД')
+    parser.add_argument('--date-from', help='YYYY-MM-DD, по умолчанию вчера')
+    parser.add_argument('--date-to', help='YYYY-MM-DD включительно, по умолчанию вчера')
+    args = parser.parse_args()
+    date_from, date_to = parse_period(args.date_from, args.date_to)
+
+    bitrix = Bitrix(os.getenv('bitrix_host'), os.getenv('bitrix_token'), os.getenv('bitrix_user'))
+    items = bitrix.get_data(date_from, date_to)
+    if items:
+        bitrix.to_db(bitrix.to_df(items))
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception:
+        logger.exception('Критическая ошибка')
+        sys.exit(1)
