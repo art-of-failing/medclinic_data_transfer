@@ -1,117 +1,95 @@
-from datetime import datetime, timedelta
+import argparse
 import os
+import sys
 
 from dotenv import load_dotenv
 import pandas as pd
-import requests
 
-from logger import logger
-from psgsql_connect import db
-
+from logger import get_logger
+from psgsql_connect import bulk_insert, connect
+from utils import TIMEOUT, check_response, http_session, parse_period, to_rows
 
 load_dotenv()
-ct_api_token = os.getenv('ct_api_token')
-ct_site_id = os.getenv('ct_site_id')
+
+COLUMNS = ['callId', 'date', 'callerNumber', 'utmSource', 'utmMedium', 'utmCampaign', 'utmContent',
+           'utmTerm', 'siteName']
+
+UPSERT = """INSERT INTO calltouch_data
+                (callId, date, callerNumber, utmSource, utmMedium, utmCampaign, utmContent, utmTerm, siteName)
+            VALUES %s
+            ON CONFLICT (siteName, callId)
+            DO UPDATE SET
+                date = EXCLUDED.date,
+                callernumber = EXCLUDED.callerNumber,
+                utmsource = EXCLUDED.utmSource,
+                utmmedium = EXCLUDED.utmMedium,
+                utmcampaign = EXCLUDED.utmCampaign,
+                utmcontent = EXCLUDED.utmContent,
+                utmterm = EXCLUDED.utmTerm"""
+
+logger = get_logger('calltouch')
 
 
-class Calltouch():
-    def __init__(self,site_id,token):
+class Calltouch:
+    def __init__(self, site_id, token):
         self.site_id = site_id
         self.__token = token
+        self.session = http_session()
 
-    def get_yesterday_data(self):
-        yesterday = (datetime.today() - timedelta(days=1)).strftime('%d/%m/%Y')
+    def get_data(self, date_from, date_to):
+        """Все звонки за период (даты включительно), со всех страниц."""
         url = f'https://api.calltouch.ru/calls-service/RestAPI/{self.site_id}/calls-diary/calls'
         params = {
-            'clientApiId':self.__token,
-            'dateFrom': yesterday,
-            'dateTo': yesterday
+            'clientApiId': self.__token,
+            'dateFrom': date_from.strftime('%d/%m/%Y'),
+            'dateTo': date_to.strftime('%d/%m/%Y'),
+            'limit': 500,
         }
+        records, page = [], 1
+        while True:
+            response = self.session.get(url, params={**params, 'page': page}, timeout=TIMEOUT)
+            data = check_response(response, 'Calltouch')
+            records.extend(data['records'])
+            if page >= data['pageTotal']:
+                break
+            page += 1
+        logger.info(f'Данные Calltouch за {date_from} — {date_to} получены: {len(records)} звонков')
+        return records
 
+    @staticmethod
+    def to_df(records):
+        df = pd.DataFrame(records, columns=COLUMNS)
+        df['date'] = pd.to_datetime(df['date'], dayfirst=True)
+        # Повтор ключа в одном INSERT ... ON CONFLICT вызывает ошибку
+        return df.drop_duplicates(['siteName', 'callId'], keep='last')
+
+    @staticmethod
+    def to_db(df):
+        if df.empty:
+            return
+        conn = connect()
         try:
-            response = requests.get(url=url,params=params)
-        except Exception as e:
-            logger.log(50,f'Ошибка выгрузки данных Calltouch. Текст ошибки: {e}')
-        else:
-            if response.status_code != 200:
-                logger.log(50,f'Ошибка запроса Calltouch {response.status_code}. Ответ: {response.json()}')
-            else:
-                logger.log(20,f'Данные Calltouch за {yesterday} получены!')
-                self.status_code = response.status_code
-                self.json = response.json()
-
-                df = self.to_df(response.json())
-                self.to_db(df=df,db=db)
-
-    
-    def get_custom_date_data(self,date1,date2,page=1):
-        print(page)
-        url = f'https://api.calltouch.ru/calls-service/RestAPI/{self.site_id}/calls-diary/calls'
-        params = {
-            'clientApiId':self.__token,
-            'dateFrom': date1,
-            'dateTo': date2,
-            'page': page,
-            'limit': 500
-        }
-
-        try:
-            response = requests.get(url=url,params=params)
-        except Exception as e:
-            logger.log(50,f'Ошибка выгрузки данных Calltouch. Текст ошибки: {e}')
-        else:
-            if response.status_code != 200:
-                logger.log(50,f'Ошибка запроса Calltouch {response.status_code}. Ответ: {response.json()}')
-            else:
-                self.status_code = response.status_code
-                self.json = response.json()
-
-                df = self.to_df(self.json['records'])
-                self.to_db(df=df,db=db)
-
-                if self.json['pageTotal'] > self.json['page']:
-                    print(self.json['pageTotal'],self.json['page'])
-                    page +=1
-                    self.get_custom_date_data(date1,date2,page)
-
-    def to_df(self,data):
-        colums = ['callId','date','duration','callerNumber','utmSource','utmMedium','utmCampaign','utmContent','utmTerm','siteName']
-        df = pd.DataFrame(data)[colums]
-        df['date'] = pd.to_datetime(df['date'],dayfirst=True)
-        df['duration'] = df['date'] + pd.to_timedelta(df['duration'], unit='s')
-        return df
-    
-    def to_db(self,df,db):
-        count = 0
-        for i,row in df.iterrows():
-            query =  """INSERT  INTO calltouch_data VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                        ON CONFLICT (siteName, callId)
-                        DO UPDATE SET
-                            date = EXCLUDED.date,
-                            callernumber = EXCLUDED.callerNumber,
-                            utmsource = EXCLUDED.utmSource,
-                            utmmedium = EXCLUDED.utmMedium,
-                            utmcampaign = EXCLUDED.utmCampaign,
-                            utmcontent = EXCLUDED.utmContent,
-                            utmterm = EXCLUDED.utmTerm;"""
-            try:
-                db.post(query=query,vars=(row['callId'],
-                                                row['date'],
-                                                row['callerNumber'],
-                                                row['utmSource'],
-                                                row['utmMedium'],
-                                                row['utmCampaign'],
-                                                row['utmContent'],
-                                                row['utmTerm'],
-                                                row['siteName']))
-            except:
-                ...
-            else:
-                count += 1
-        logger.log(20,f'В БД calltouch_data записано {count} из {len(df)} строк!')
-
-ct_pirogova = Calltouch(site_id=ct_site_id,token=ct_api_token)
-ct_pirogova.get_yesterday_data()
-#ct_pirogova.get_custom_date_data('20/04/2026','25/05/2026')
+            with conn, conn.cursor() as cur:
+                bulk_insert(cur, UPSERT, to_rows(df))
+        finally:
+            conn.close()
+        logger.info(f'В БД calltouch_data записано {len(df)} строк')
 
 
+def main():
+    parser = argparse.ArgumentParser(description='Выгрузка звонков Calltouch в БД')
+    parser.add_argument('--date-from', help='YYYY-MM-DD, по умолчанию вчера')
+    parser.add_argument('--date-to', help='YYYY-MM-DD включительно, по умолчанию вчера')
+    args = parser.parse_args()
+    date_from, date_to = parse_period(args.date_from, args.date_to)
+
+    ct = Calltouch(site_id=os.getenv('ct_site_id'), token=os.getenv('ct_api_token'))
+    ct.to_db(ct.to_df(ct.get_data(date_from, date_to)))
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception:
+        logger.exception('Критическая ошибка')
+        sys.exit(1)
